@@ -220,6 +220,7 @@ tfoot td{border-top:1px solid var(--line-2);border-bottom:0;font-weight:500;back
         </div>
         <div class="gateerr" id="setupErr"></div>
         <button class="btn primary" type="submit">保存并连接</button>
+        <button class="btn" type="button" id="setupCancel" hidden>以后再说，先本机记账</button>
         <p class="hint">这两个值在 Supabase 后台 <b>Project Settings → API</b> 里。anon key 是公开密钥，放在网页里是 Supabase 的正常用法，真正的权限由数据库的 RLS 规则把关。<br>暂存在本机浏览器；正式发布前请把它们填进 <code>index.html</code> 顶部的 CONFIG 两行，别人打开才不用再填。</p>
       </div>
     </form>
@@ -254,7 +255,8 @@ tfoot td{border-top:1px solid var(--line-2);border-bottom:0;font-weight:500;back
     </div>
     <div class="who">
       <div class="syncchip"><span class="dot" id="syncdot"></span><span id="synctext">连接中…</span></div>
-      <button class="btn tiny" id="logoutBtn">退出</button>
+      <button class="btn tiny" id="shareBtn" hidden>启用多人共享</button>
+      <button class="btn tiny" id="logoutBtn" hidden>退出</button>
     </div>
   </header>
 
@@ -378,7 +380,7 @@ var SUPABASE_ANON_KEY = "PASTE_YOUR_SUPABASE_ANON_KEY";
 (function(){
   "use strict";
 
-  var CUR="¥", LS_CFG="shanghang-cfg-v1";
+  var CUR="¥", LS_CFG="shanghang-cfg-v1", LS_DATA="shanghang-data-v1";
   var DEFAULT_CATS={income:["销售收入","其他收入"],expense:["推广费用","人员支出","其他支出"]};
   var sb=null, cfg={url:"",key:""};
   var state={ entries:[], cats:JSON.parse(JSON.stringify(DEFAULT_CATS)), demo:false,
@@ -430,6 +432,18 @@ var SUPABASE_ANON_KEY = "PASTE_YOUR_SUPABASE_ANON_KEY";
   function knownMonths(){ var s={}; state.entries.forEach(function(e){ s[monthOf(e)]=1; });
     s[ymNow()]=1; s[state.month]=1; return Object.keys(s).sort(); }
 
+  /* ---------- 本机存储（未配置 Supabase 时使用） ---------- */
+  function saveLocal(){
+    try{ localStorage.setItem(LS_DATA, JSON.stringify({entries:state.entries, cats:state.cats})); }catch(_){}
+  }
+  function loadLocalData(){
+    try{
+      var o=JSON.parse(localStorage.getItem(LS_DATA)||"null");
+      if(!o||!Array.isArray(o.entries)) return null;
+      return { entries:o.entries.map(normalize).filter(Boolean), cats:(o.cats&&o.cats.income)?o.cats:null };
+    }catch(_){ return null; }
+  }
+
   /* ---------- supabase ---------- */
   function loadCfg(){
     if(SUPABASE_URL.indexOf("http")===0 && SUPABASE_ANON_KEY.length>20)
@@ -454,6 +468,14 @@ var SUPABASE_ANON_KEY = "PASTE_YOUR_SUPABASE_ANON_KEY";
   }
 
   async function fetchAll(){
+    if(!sb){
+      var l=loadLocalData();
+      if(l){ state.entries=l.entries; if(l.cats) state.cats=l.cats; }
+      else state.entries=[];
+      state.demo = state.entries.length===0;
+      if(state.demo) state.entries=demoData();
+      return;
+    }
     var r = await sb.from("entries").select("*").order("entry_date",{ascending:false}).limit(5000);
     if(r.error) throw r.error;
     state.entries=(r.data||[]).map(fromRow).filter(Boolean);
@@ -465,6 +487,7 @@ var SUPABASE_ANON_KEY = "PASTE_YOUR_SUPABASE_ANON_KEY";
   }
 
   async function pushEntry(e, isUpdate){
+    if(!sb){ saveLocal(); return; }
     var row=toRow(e);
     var r = isUpdate
       ? await sb.from("entries").update(row).eq("id",e.id)
@@ -472,10 +495,12 @@ var SUPABASE_ANON_KEY = "PASTE_YOUR_SUPABASE_ANON_KEY";
     if(r.error) throw r.error;
   }
   async function pushDelete(id){
+    if(!sb){ saveLocal(); return; }
     var r=await sb.from("entries")["delete"]().eq("id",id);
     if(r.error) throw r.error;
   }
   async function pushCats(){
+    if(!sb){ saveLocal(); return; }
     var r=await sb.from("app_settings").upsert({key:"categories", value:state.cats, updated_at:new Date().toISOString()});
     if(r.error) toast(dbMsg(r.error));
   }
@@ -674,7 +699,9 @@ var SUPABASE_ANON_KEY = "PASTE_YOUR_SUPABASE_ANON_KEY";
     $("detailNote").textContent=scopeTxt+" · "+rows.length+" 笔";
     var box=$("tableBox");
     if(!rows.length){ box.innerHTML='<div class="empty">没有符合条件的记录。</div>'; return; }
-    box.innerHTML='<table><thead><tr><th>日期</th><th>类型</th><th>类别</th><th class="num">金额 (¥)</th><th>备注</th><th>记录人</th><th class="num">操作</th></tr></thead><tbody>'
+    var byCol=!!sb;
+    box.innerHTML='<table><thead><tr><th>日期</th><th>类型</th><th>类别</th><th class="num">金额 (¥)</th><th>备注</th>'
+      +(byCol?'<th>记录人</th>':'')+'<th class="num">操作</th></tr></thead><tbody>'
       +rows.map(function(e){
         var color=e.type==="income"?"var(--income)":"var(--expense)";
         return '<tr><td class="num" style="text-align:left">'+e.date+'</td>'
@@ -682,12 +709,12 @@ var SUPABASE_ANON_KEY = "PASTE_YOUR_SUPABASE_ANON_KEY";
           +'<td>'+esc(e.category)+'</td>'
           +'<td class="num amt '+e.type+'">'+(e.type==="income"?"+":"−")+money(e.amount).slice(1)+'</td>'
           +'<td class="note">'+(esc(e.note)||'<span style="color:var(--muted)">—</span>')+'</td>'
-          +'<td class="by">'+(esc((e.by||"").split("@")[0])||"—")+'</td>'
+          +(byCol?'<td class="by">'+(esc((e.by||"").split("@")[0])||"—")+'</td>':'')
           +'<td class="num"><span class="rowacts"><button class="btn ghost tiny" data-edit="'+e.id+'">编辑</button>'
           +'<button class="btn ghost tiny" data-del="'+e.id+'">删除</button></span></td></tr>';
       }).join("")
       +'</tbody><tfoot><tr><td colspan="3">合计 · 收 '+money(t.income)+' / 支 '+money(t.expense)+'</td>'
-      +'<td class="num" style="color:'+(t.net<0?"var(--neg)":"var(--pos)")+'">'+money(t.net)+'</td><td colspan="3"></td></tr></tfoot></table>';
+      +'<td class="num" style="color:'+(t.net<0?"var(--neg)":"var(--pos)")+'">'+money(t.net)+'</td><td colspan="'+(byCol?3:2)+'"></td></tr></tfoot></table>';
     Array.prototype.forEach.call(box.querySelectorAll("[data-del]"),function(b){ b.onclick=function(){ removeEntry(b.getAttribute("data-del")); }; });
     Array.prototype.forEach.call(box.querySelectorAll("[data-edit]"),function(b){ b.onclick=function(){ startEdit(b.getAttribute("data-edit")); }; });
   }
@@ -825,6 +852,11 @@ var SUPABASE_ANON_KEY = "PASTE_YOUR_SUPABASE_ANON_KEY";
     });
     if(!added.length){ toast("没有解析到可导入的记录。"); return; }
     if(state.demo){ state.demo=false; state.entries=[]; }
+    if(!sb){
+      state.entries=state.entries.concat(added); saveLocal(); render();
+      toast("已导入 "+added.length+" 笔"+(skipped?"，跳过 "+skipped+" 行":""));
+      return;
+    }
     try{
       for(var i=0;i<added.length;i+=200){
         var chunk=added.slice(i,i+200).map(toRow);
@@ -893,6 +925,8 @@ var SUPABASE_ANON_KEY = "PASTE_YOUR_SUPABASE_ANON_KEY";
   var rt;
   window.addEventListener("resize",function(){ clearTimeout(rt); rt=setTimeout(function(){ if(chartMode==="chart") renderChart(); },160); });
   $("logoutBtn").onclick=async function(){ if(sb) await sb.auth.signOut(); location.reload(); };
+  $("shareBtn").onclick=function(){ showGate("setup"); $("setupCancel").hidden=false; };
+  $("setupCancel").onclick=function(){ $("gate").hidden=true; $("app").hidden=false; };
 
   /* ---------- boot ---------- */
   function showGate(which){
@@ -933,12 +967,15 @@ var SUPABASE_ANON_KEY = "PASTE_YOUR_SUPABASE_ANON_KEY";
     catch(err){ setSync("warn","读取失败"); toast(dbMsg(err)); }
   }
   async function start(session){
-    state.me=session.user;
+    state.me=session?session.user:null;
     $("gate").hidden=true; $("app").hidden=false;
+    $("logoutBtn").hidden=!sb;
+    $("shareBtn").hidden=!!sb;
     setType("expense"); $("fDate").value=todayStr();
     setSync("","读取中…");
     await refresh();
-    setSync("ok","已同步 · "+(state.me.email||"").split("@")[0]);
+    if(!sb){ setSync("warn","本机模式 · 数据只存在这台设备"); return; }
+    setSync("ok","已同步 · "+((state.me&&state.me.email)||"").split("@")[0]);
     if(channel) sb.removeChannel(channel);
     channel=sb.channel("ledger-live")
       .on("postgres_changes",{event:"*",schema:"public",table:"entries"},function(){ refresh(); })
@@ -949,7 +986,7 @@ var SUPABASE_ANON_KEY = "PASTE_YOUR_SUPABASE_ANON_KEY";
   (async function boot(){
     showGate("busy");
     var c=loadCfg();
-    if(!c){ showGate("setup"); return; }
+    if(!c){ start(null); return; }
     cfg=c;
     if(!window.supabase||!window.supabase.createClient){
       showGate("setup"); gateErr("setupErr","Supabase 脚本没能加载，检查一下网络后刷新页面。"); return;
